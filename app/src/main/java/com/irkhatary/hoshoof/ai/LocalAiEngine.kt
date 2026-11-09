@@ -28,6 +28,8 @@ class LocalAiEngine(private val cachePath: String) {
                 EngineConfig(
                     modelPath = modelPath,
                     backend = Backend.CPU(),
+                    visionBackend = Backend.CPU(),
+                    audioBackend = Backend.CPU(),
                     cacheDir = cachePath
                 )
             )
