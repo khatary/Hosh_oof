@@ -39,9 +39,10 @@ private data class ChatMessage(val text: String, val fromUser: Boolean)
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var pendingSpeechResult: ((String) -> Unit)? = null
     private val askAudioPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> if (granted) startSpeechInput() }
+    ) { granted -> if (granted) launchSpeechInput() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,13 +59,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "hosh_reply")
     }
 
-    private fun requestSpeechInput() {
+    private fun requestSpeechInput(onResult: (String) -> Unit) {
+        pendingSpeechResult = onResult
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED) startSpeechInput()
+            == PackageManager.PERMISSION_GRANTED) launchSpeechInput()
         else askAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    private fun startSpeechInput() {
+    private fun launchSpeechInput() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -79,13 +81,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 701 && resultCode == RESULT_OK) {
             val spoken = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-            if (!spoken.isNullOrBlank()) sendRecognizedText(spoken)
+            if (!spoken.isNullOrBlank()) pendingSpeechResult?.invoke(spoken)
         }
-    }
-
-    private fun sendRecognizedText(text: String) {
-        // Voice input is routed through the same chat composer in the UI in a later iteration.
-        speak("صدای شما دریافت شد. موتور هوش مصنوعی آفلاین هنوز به برنامه متصل نشده است.")
+        pendingSpeechResult = null
     }
 
     override fun onDestroy() {
@@ -96,7 +94,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 }
 
 @Composable
-private fun HoshApp(onSpeak: (String) -> Unit, onMic: () -> Unit) {
+private fun HoshApp(onSpeak: (String) -> Unit, onMic: ((String) -> Unit) -> Unit) {
     var input by remember { mutableStateOf("") }
     val messages = remember {
         mutableStateListOf(
@@ -149,7 +147,14 @@ private fun HoshApp(onSpeak: (String) -> Unit, onMic: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().background(panel, RoundedCornerShape(24.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onMic) { Icon(Icons.Default.Mic, contentDescription = "مکالمه صوتی", tint = accent) }
+                IconButton(onClick = {
+                    onMic { spoken ->
+                        messages.add(ChatMessage(spoken, true))
+                        val reply = "متوجه شدم: «$spoken»؛ موتور مدل زبانی آفلاین هنوز به برنامه متصل نشده است."
+                        messages.add(ChatMessage(reply, false))
+                        onSpeak(reply)
+                    }
+                }) { Icon(Icons.Default.Mic, contentDescription = "مکالمه صوتی", tint = accent) }
                 BasicTextField(
                     value = input, onValueChange = { input = it },
                     modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
