@@ -3,6 +3,7 @@ package com.irkhatary.hoshoof
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -11,6 +12,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,8 +21,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,58 +39,113 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import java.io.File
 import java.util.Locale
 
-private data class ChatMessage(val text: String, val fromUser: Boolean)
+private data class ChatMessage(val id: Long, val text: String, val fromUser: Boolean, val attachment: String? = null)
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var tts: TextToSpeech? = null
     private var ttsReady = false
-    private var pendingSpeechResult: ((String) -> Unit)? = null
-    private val askAudioPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted -> if (granted) launchSpeechInput() }
+    private var speechCallback: ((String) -> Unit)? = null
+
+    private val speechLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val spoken = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+            if (!spoken.isNullOrBlank()) speechCallback?.invoke(spoken)
+        }
+        speechCallback = null
+    }
+    private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) launchSpeechRecognition()
+    }
+    private val imagePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION); pickedImage = it }
+    }
+    private val modelPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { importLocalModel(it) }
+    }
+
+    private var pickedImage by mutableStateOf<Uri?>(null)
+    private var modelStatus by mutableStateOf("هنوز مدلی نصب نشده")
+    private var modelFile by mutableStateOf<File?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tts = TextToSpeech(this, this)
-        setContent { HoshApp(onSpeak = ::speak, onMic = ::requestSpeechInput) }
+        val existing = File(filesDir, "models/assistant.gguf")
+        if (existing.exists()) {
+            modelFile = existing
+            modelStatus = "مدل محلی وارد شده: ${existing.name}"
+        }
+        setContent {
+            HoshApp(
+                modelStatus = modelStatus,
+                onSpeak = ::speak,
+                onMic = ::requestSpeech,
+                onPickImage = { imagePicker.launch(arrayOf("image/*")) },
+                onPickModel = { modelPicker.launch(arrayOf("*/*")) },
+                onRemoveImage = { pickedImage = null },
+                imageUri = pickedImage,
+                onSend = { text, image ->
+                    // The conversation UI is ready. Model inference is enabled only after a compatible
+                    // local runtime and model have been installed; never fake an AI response.
+                }
+            )
+        }
     }
 
     override fun onInit(status: Int) {
         ttsReady = status == TextToSpeech.SUCCESS
-        if (ttsReady) tts?.language = Locale("fa", "IR")
+        if (ttsReady) {
+            val result = tts?.setLanguage(Locale("fa", "IR"))
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts?.language = Locale.getDefault()
+            }
+        }
     }
 
     private fun speak(text: String) {
-        if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "hosh_reply")
+        if (ttsReady) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "hosh_voice_reply")
     }
 
-    private fun requestSpeechInput(onResult: (String) -> Unit) {
-        pendingSpeechResult = onResult
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED) launchSpeechInput()
-        else askAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+    private fun requestSpeech(callback: (String) -> Unit) {
+        speechCallback = callback
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            launchSpeechRecognition()
+        } else {
+            micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
 
-    private fun launchSpeechInput() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) return
+    private fun launchSpeechRecognition() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            modelStatus = "سرویس تشخیص گفتار روی این گوشی در دسترس نیست"
+            return
+        }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "fa-IR")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "صحبت کنید")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "fa-IR")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "به فارسی صحبت کنید")
         }
-        try { startActivityForResult(intent, 701) } catch (_: Exception) { }
+        try { speechLauncher.launch(intent) } catch (_: Exception) {
+            modelStatus = "اجرای تشخیص گفتار ممکن نشد"
+        }
     }
 
-    @Deprecated("Deprecated by Android; retained for broad API compatibility")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 701 && resultCode == RESULT_OK) {
-            val spoken = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
-            if (!spoken.isNullOrBlank()) pendingSpeechResult?.invoke(spoken)
+    private fun importLocalModel(uri: Uri) {
+        try {
+            val folder = File(filesDir, "models").apply { mkdirs() }
+            val target = File(folder, "assistant.gguf")
+            contentResolver.openInputStream(uri)?.use { input ->
+                target.outputStream().use { output -> input.copyTo(output) }
+            } ?: throw IllegalStateException("فایل قابل خواندن نیست")
+            modelFile = target
+            modelStatus = "فایل مدل ذخیره شد؛ اتصال موتور اجرا در مرحله بعد انجام می‌شود"
+        } catch (e: Exception) {
+            modelStatus = "خطا در واردکردن مدل: ${e.localizedMessage ?: "نامشخص"}"
         }
-        pendingSpeechResult = null
     }
 
     override fun onDestroy() {
@@ -94,91 +156,145 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 }
 
 @Composable
-private fun HoshApp(onSpeak: (String) -> Unit, onMic: ((String) -> Unit) -> Unit) {
+private fun HoshApp(
+    modelStatus: String,
+    onSpeak: (String) -> Unit,
+    onMic: ((String) -> Unit) -> Unit,
+    onPickImage: () -> Unit,
+    onPickModel: () -> Unit,
+    onRemoveImage: () -> Unit,
+    imageUri: Uri?,
+    onSend: (String, Uri?) -> Unit
+) {
     var input by remember { mutableStateOf("") }
+    var showTools by remember { mutableStateOf(false) }
     val messages = remember {
         mutableStateListOf(
-            ChatMessage("سلام! من هوش آفلاین هستم. می‌توانی به فارسی با من گفتگو کنی.", false),
-            ChatMessage("نسخهٔ اولیهٔ محیط گفتگو آماده است. موتور مدل زبانی آفلاین در مرحلهٔ بعد اضافه می‌شود.", false)
+            ChatMessage(1, "سلام! من هوش آفلاین هستم. این محیط گفت‌وگو برای اجرای مدل‌های محلی آماده‌سازی شده است.", false),
+            ChatMessage(2, "برای پاسخ‌گویی هوشمند، ابتدا باید موتور استنتاج و فایل مدل سازگار نصب شوند. تا آن زمان پاسخ ساختگی تولید نمی‌کنم.", false)
         )
     }
-    val bg = Color(0xFF090D18)
-    val panel = Color(0xFF151D2E)
-    val accent = Color(0xFF6D7CFF)
+    val bg = Color(0xFF080D18)
+    val surface = Color(0xFF121B2B)
+    val panel = Color(0xFF19243A)
+    val accent = Color(0xFF8B7CFF)
+    val muted = Color(0xFF9BA9C5)
 
-    MaterialTheme(colorScheme = darkColorScheme(
-        primary = accent, background = bg, surface = panel,
-        onBackground = Color(0xFFF2F4FF), onSurface = Color(0xFFF2F4FF)
-    )) {
-        Column(Modifier.fillMaxSize().background(bg).padding(16.dp)) {
+    MaterialTheme(colorScheme = darkColorScheme(primary = accent, background = bg, surface = surface)) {
+        Column(Modifier.fillMaxSize().background(bg).padding(horizontal = 16.dp, vertical = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Surface(shape = CircleShape, color = accent.copy(alpha = .18f), modifier = Modifier.size(46.dp)) {
-                    Box(contentAlignment = Alignment.Center) { Text("هوش", color = Color.White, fontWeight = FontWeight.Bold) }
+                Surface(shape = RoundedCornerShape(15.dp), color = accent.copy(alpha = .18f), modifier = Modifier.size(46.dp)) {
+                    Box(contentAlignment = Alignment.Center) { Text("هوش", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp) }
                 }
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(11.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("هوش آفلاین", fontSize = 21.sp, fontWeight = FontWeight.Bold, color = Color.White)
-                    Text("دستیار فارسی چندزبانه", fontSize = 12.sp, color = Color(0xFF9BA8C5))
+                    Text("هوش آفلاین", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text("دستیار هوشمند شخصی", color = muted, fontSize = 11.sp)
                 }
-                Text("نسخه ۰.۱", color = Color(0xFF9BA8C5), fontSize = 11.sp)
+                IconButton(onClick = { showTools = !showTools }) {
+                    Icon(Icons.Default.Settings, contentDescription = "تنظیمات", tint = muted)
+                }
             }
-            Spacer(Modifier.height(20.dp))
-            Surface(color = Color(0xFF11192A), shape = RoundedCornerShape(18.dp), modifier = Modifier.fillMaxWidth().weight(1f)) {
+
+            if (showTools) {
+                Spacer(Modifier.height(12.dp))
+                Surface(color = surface, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("مدل هوش مصنوعی", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(5.dp))
+                        Text(modelStatus, color = muted, fontSize = 12.sp)
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedButton(onClick = onPickModel, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.FolderOpen, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("وارد کردن فایل مدل محلی")
+                        }
+                        Text("فایل مدل باید با موتور اجرا سازگار باشد. صرفاً واردکردن فایل، به معنی فعال‌شدن هوش مصنوعی نیست.", color = muted, fontSize = 10.sp, lineHeight = 15.sp)
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("گفت‌وگوی جدید", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("حالت محلی", color = Color(0xFF8EE6B1), fontSize = 11.sp)
+            }
+            Spacer(Modifier.height(10.dp))
+
+            Surface(color = Color(0xFF0E1625), shape = RoundedCornerShape(22.dp), modifier = Modifier.weight(1f).fillMaxWidth()) {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize().padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    reverseLayout = false
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    items(messages) { msg ->
+                    items(messages, key = { it.id }) { msg ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = if (msg.fromUser) Arrangement.Start else Arrangement.End) {
-                            Surface(
-                                color = if (msg.fromUser) Color(0xFF25324A) else Color(0xFF20284A),
-                                shape = RoundedCornerShape(16.dp),
-                                modifier = Modifier.widthIn(max = 300.dp)
-                            ) {
-                                Text(msg.text, modifier = Modifier.padding(14.dp), color = Color.White, textAlign = TextAlign.Start, lineHeight = 22.sp)
+                            Column(horizontalAlignment = if (msg.fromUser) Alignment.Start else Alignment.End) {
+                                Text(if (msg.fromUser) "شما" else "هوش آفلاین", color = muted, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+                                Surface(
+                                    color = if (msg.fromUser) Color(0xFF263653) else Color(0xFF202746),
+                                    shape = RoundedCornerShape(17.dp),
+                                    modifier = Modifier.widthIn(max = 310.dp)
+                                ) {
+                                    Text(msg.text, modifier = Modifier.padding(13.dp), color = Color(0xFFF1F3FA), fontSize = 14.sp, textAlign = TextAlign.Start, lineHeight = 23.sp)
+                                }
                             }
                         }
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth().background(panel, RoundedCornerShape(24.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = {
-                    onMic { spoken ->
-                        messages.add(ChatMessage(spoken, true))
-                        val reply = "متوجه شدم: «$spoken»؛ موتور مدل زبانی آفلاین هنوز به برنامه متصل نشده است."
-                        messages.add(ChatMessage(reply, false))
-                        onSpeak(reply)
+
+            if (imageUri != null) {
+                Spacer(Modifier.height(8.dp))
+                Surface(color = panel, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Image, contentDescription = null, tint = accent)
+                        Spacer(Modifier.width(8.dp))
+                        Text("یک تصویر پیوست شده", color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        IconButton(onClick = onRemoveImage) { Icon(Icons.Default.Close, contentDescription = "حذف تصویر", tint = muted) }
                     }
-                }) { Icon(Icons.Default.Mic, contentDescription = "مکالمه صوتی", tint = accent) }
-                BasicTextField(
-                    value = input, onValueChange = { input = it },
-                    modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                    textStyle = LocalTextStyle.current.copy(color = Color.White, fontSize = 15.sp, textAlign = TextAlign.Right),
-                    decorationBox = { inner ->
-                        Box {
-                            if (input.isEmpty()) Text("پیامت را بنویس...", color = Color(0xFF8490A9))
-                            inner()
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            Surface(color = surface, shape = RoundedCornerShape(25.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onPickImage) { Icon(Icons.Default.AttachFile, contentDescription = "افزودن تصویر", tint = muted) }
+                        BasicTextField(
+                            value = input,
+                            onValueChange = { input = it },
+                            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                            textStyle = LocalTextStyle.current.copy(color = Color.White, fontSize = 14.sp, textAlign = TextAlign.Right),
+                            decorationBox = { inner ->
+                                Box {
+                                    if (input.isEmpty()) Text("پیامت را بنویس...", color = muted, fontSize = 13.sp)
+                                    inner()
+                                }
+                            }
+                        )
+                        IconButton(onClick = {
+                            onMic { recognized -> input = if (input.isBlank()) recognized else "$input $recognized" }
+                        }) { Icon(Icons.Default.Mic, contentDescription = "گفتار به متن", tint = accent) }
+                        IconButton(onClick = {
+                            if (input.isNotBlank() || imageUri != null) {
+                                val text = input.trim().ifBlank { "این تصویر را بررسی کن." }
+                                messages.add(ChatMessage(System.currentTimeMillis(), text, true, imageUri?.toString()))
+                                onSend(text, imageUri)
+                                input = ""
+                                onRemoveImage()
+                            }
+                        }) {
+                            Surface(color = accent, shape = CircleShape, modifier = Modifier.size(38.dp)) {
+                                Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Send, contentDescription = "ارسال پیام", tint = Color.White, modifier = Modifier.size(18.dp)) }
+                            }
                         }
                     }
-                )
-                IconButton(onClick = {
-                    if (input.isNotBlank()) {
-                        messages.add(ChatMessage(input.trim(), true))
-                        input = ""
-                        messages.add(ChatMessage("موتور هوش مصنوعی محلی هنوز نصب نشده است؛ این بخش در مرحلهٔ بعد به مدل آفلاین متصل می‌شود.", false))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.VolumeUp, contentDescription = null, tint = muted, modifier = Modifier.size(13.dp))
+                        Spacer(Modifier.width(5.dp))
+                        Text("پاسخ صوتی و گفتار فارسی • موتور آفلاین در حال توسعه", color = muted, fontSize = 10.sp)
                     }
-                }) { Icon(Icons.Default.Send, contentDescription = "ارسال", tint = accent) }
-            }
-            Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.VolumeUp, contentDescription = null, tint = Color(0xFF8D9ABC), modifier = Modifier.size(15.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("مکالمه صوتی آزمایشی • پردازش کاملاً آفلاین هنوز فعال نشده", color = Color(0xFF8D9ABC), fontSize = 10.sp)
+                }
             }
         }
     }
