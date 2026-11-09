@@ -267,7 +267,7 @@ private fun HoshApp(
                             Spacer(Modifier.width(8.dp))
                             Text("وارد کردن فایل مدل محلی")
                         }
-                        Text("فایل مدل باید با موتور اجرا سازگار باشد. صرفاً واردکردن فایل، به معنی فعال‌شدن هوش مصنوعی نیست.", color = muted, fontSize = 10.sp, lineHeight = 15.sp)
+                        Text("برای چت، مدل LiteRT-LM لازم است. تحلیل عکس فقط با مدل چندوجهی مانند Gemma 3n کار می‌کند. گفتار آفلاین نیز به موتور تشخیص گفتار آفلاین نصب‌شده روی گوشی نیاز دارد.", color = muted, fontSize = 10.sp, lineHeight = 15.sp)
                     }
                 }
             }
