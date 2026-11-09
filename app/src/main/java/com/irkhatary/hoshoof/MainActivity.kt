@@ -39,6 +39,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import com.irkhatary.hoshoof.ai.LocalAiEngine
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
 
@@ -69,14 +72,20 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var pickedImage by mutableStateOf<Uri?>(null)
     private var modelStatus by mutableStateOf("هنوز مدلی نصب نشده")
     private var modelFile by mutableStateOf<File?>(null)
+    private val aiEngine = LocalAiEngine()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         tts = TextToSpeech(this, this)
-        val existing = File(filesDir, "models/assistant.gguf")
+        val existing = File(filesDir, "models/assistant.litertlm")
         if (existing.exists()) {
             modelFile = existing
-            modelStatus = "مدل محلی وارد شده: ${existing.name}"
+            modelStatus = "در حال بارگذاری مدل ذخیره‌شده..."
+            lifecycleScope.launch {
+                runCatching { aiEngine.load(existing.absolutePath) }
+                    .onSuccess { modelStatus = "مدل آفلاین آماده پاسخ‌گویی است" }
+                    .onFailure { modelStatus = "بارگذاری مدل ناموفق بود: ${it.localizedMessage ?: "خطا"}" }
+            }
         }
         setContent {
             HoshApp(
@@ -87,9 +96,16 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 onPickModel = { modelPicker.launch(arrayOf("*/*")) },
                 onRemoveImage = { pickedImage = null },
                 imageUri = pickedImage,
-                onSend = { text, image ->
-                    // The conversation UI is ready. Model inference is enabled only after a compatible
-                    // local runtime and model have been installed; never fake an AI response.
+                onSend = { text, image, onReply ->
+                    lifecycleScope.launch {
+                        val answer = if (image != null) {
+                            "در حال حاضر موتور تحلیل تصویر هنوز به مدل چندوجهی متصل نشده است. فعلاً می‌توانم به پیام‌های متنی پاسخ بدهم."
+                        } else {
+                            runCatching { aiEngine.reply(text) }
+                                .getOrElse { "هوش آفلاین هنوز آماده نیست: ${it.localizedMessage ?: "ابتدا یک مدل سازگار وارد کنید."}" }
+                        }
+                        onReply(answer)
+                    }
                 }
             )
         }
@@ -137,12 +153,17 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private fun importLocalModel(uri: Uri) {
         try {
             val folder = File(filesDir, "models").apply { mkdirs() }
-            val target = File(folder, "assistant.gguf")
+            val target = File(folder, "assistant.litertlm")
             contentResolver.openInputStream(uri)?.use { input ->
                 target.outputStream().use { output -> input.copyTo(output) }
             } ?: throw IllegalStateException("فایل قابل خواندن نیست")
             modelFile = target
-            modelStatus = "فایل مدل ذخیره شد؛ اتصال موتور اجرا در مرحله بعد انجام می‌شود"
+            modelStatus = "فایل ذخیره شد؛ در حال راه‌اندازی موتور هوش مصنوعی..."
+            lifecycleScope.launch {
+                runCatching { aiEngine.load(target.absolutePath) }
+                    .onSuccess { modelStatus = "مدل آفلاین آماده پاسخ‌گویی است" }
+                    .onFailure { modelStatus = "مدل بارگذاری نشد: ${it.localizedMessage ?: "فایل یا قالب ناسازگار"}" }
+            }
         } catch (e: Exception) {
             modelStatus = "خطا در واردکردن مدل: ${e.localizedMessage ?: "نامشخص"}"
         }
@@ -151,6 +172,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         tts?.stop()
         tts?.shutdown()
+        aiEngine.close()
         super.onDestroy()
     }
 }
@@ -164,7 +186,7 @@ private fun HoshApp(
     onPickModel: () -> Unit,
     onRemoveImage: () -> Unit,
     imageUri: Uri?,
-    onSend: (String, Uri?) -> Unit
+    onSend: (String, Uri?, (String) -> Unit) -> Unit
 ) {
     var input by remember { mutableStateOf("") }
     var showTools by remember { mutableStateOf(false) }
@@ -279,7 +301,10 @@ private fun HoshApp(
                             if (input.isNotBlank() || imageUri != null) {
                                 val text = input.trim().ifBlank { "این تصویر را بررسی کن." }
                                 messages.add(ChatMessage(System.currentTimeMillis(), text, true, imageUri?.toString()))
-                                onSend(text, imageUri)
+                                onSend(text, imageUri) { answer ->
+                                    messages.add(ChatMessage(System.currentTimeMillis(), answer, false))
+                                    onSpeak(answer)
+                                }
                                 input = ""
                                 onRemoveImage()
                             }
