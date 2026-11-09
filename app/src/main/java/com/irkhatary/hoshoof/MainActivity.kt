@@ -42,6 +42,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.irkhatary.hoshoof.ai.LocalAiEngine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
@@ -183,28 +186,31 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun importLocalModel(uri: Uri) {
-        try {
-            val folder = File(filesDir, "models").apply { mkdirs() }
-            val target = File(folder, "assistant.litertlm")
-            contentResolver.openInputStream(uri)?.use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
-            } ?: throw IllegalStateException("فایل قابل خواندن نیست")
-            modelFile = target
-            modelStatus = "فایل ذخیره شد؛ در حال راه‌اندازی موتور هوش مصنوعی..."
-            lifecycleScope.launch {
-                runCatching { aiEngine.load(target.absolutePath) }
-                    .onSuccess { modelStatus = "مدل آفلاین آماده پاسخ‌گویی است" }
-                    .onFailure { modelStatus = "مدل بارگذاری نشد: ${it.localizedMessage ?: "فایل یا قالب ناسازگار"}" }
+        lifecycleScope.launch {
+            modelStatus = "در حال کپی‌کردن فایل مدل..."
+            try {
+                val target = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    val folder = File(filesDir, "models").apply { mkdirs() }
+                    val destination = File(folder, "assistant.litertlm")
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        destination.outputStream().use { output -> input.copyTo(output) }
+                    } ?: throw IllegalStateException("فایل قابل خواندن نیست")
+                    destination
+                }
+                modelFile = target
+                modelStatus = "فایل ذخیره شد؛ در حال بارگذاری مدل..."
+                aiEngine.load(target.absolutePath)
+                modelStatus = "مدل آفلاین آماده پاسخ‌گویی است"
+            } catch (e: Exception) {
+                modelStatus = "بارگذاری ناموفق: ${e.localizedMessage ?: "فایل یا قالب ناسازگار"}"
             }
-        } catch (e: Exception) {
-            modelStatus = "خطا در واردکردن مدل: ${e.localizedMessage ?: "نامشخص"}"
         }
     }
 
     override fun onDestroy() {
         tts?.stop()
         tts?.shutdown()
-        lifecycleScope.launch { aiEngine.close() }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { aiEngine.close() }
         super.onDestroy()
     }
 }
