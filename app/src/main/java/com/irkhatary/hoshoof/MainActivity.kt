@@ -43,6 +43,8 @@ import androidx.lifecycle.lifecycleScope
 import com.irkhatary.hoshoof.ai.LocalAiEngine
 import kotlinx.coroutines.launch
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.Locale
 
 private data class ChatMessage(val id: Long, val text: String, val fromUser: Boolean, val attachment: String? = null)
@@ -72,7 +74,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var pickedImage by mutableStateOf<Uri?>(null)
     private var modelStatus by mutableStateOf("هنوز مدلی نصب نشده")
     private var modelFile by mutableStateOf<File?>(null)
-    private val aiEngine = LocalAiEngine()
+    private val aiEngine = LocalAiEngine(cacheDir.absolutePath)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,13 +98,21 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 onPickModel = { modelPicker.launch(arrayOf("*/*")) },
                 onRemoveImage = { pickedImage = null },
                 imageUri = pickedImage,
+                initialMessages = loadChatHistory(),
+                onHistoryChanged = ::saveChatHistory,
                 onSend = { text, image, onReply ->
                     lifecycleScope.launch {
-                        val answer = if (image != null) {
-                            "در حال حاضر موتور تحلیل تصویر هنوز به مدل چندوجهی متصل نشده است. فعلاً می‌توانم به پیام‌های متنی پاسخ بدهم."
-                        } else {
-                            runCatching { aiEngine.reply(text) }
-                                .getOrElse { "هوش آفلاین هنوز آماده نیست: ${it.localizedMessage ?: "ابتدا یک مدل سازگار وارد کنید."}" }
+                        val answer = runCatching {
+                            val localImage = image?.let { uri ->
+                                val imageFile = File(cacheDir, "chat_image_${System.currentTimeMillis()}.jpg")
+                                contentResolver.openInputStream(uri)?.use { input ->
+                                    imageFile.outputStream().use { output -> input.copyTo(output) }
+                                } ?: throw IllegalStateException("تصویر قابل خواندن نیست")
+                                imageFile.absolutePath
+                            }
+                            aiEngine.reply(text, localImage)
+                        }.getOrElse {
+                            "پاسخ‌گویی انجام نشد: ${it.localizedMessage ?: "مدل بارگذاری نشده یا از این ورودی پشتیبانی نمی‌کند."}"
                         }
                         onReply(answer)
                     }
@@ -119,6 +129,27 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 tts?.language = Locale.getDefault()
             }
         }
+    }
+
+    private fun loadChatHistory(): List<ChatMessage> {
+        return try {
+            val array = org.json.JSONArray(getSharedPreferences("chat", MODE_PRIVATE).getString("messages", "[]"))
+            (0 until array.length()).mapNotNull { index ->
+                val item = array.optJSONObject(index) ?: return@mapNotNull null
+                ChatMessage(item.optLong("id"), item.optString("text"), item.optBoolean("user"), item.optString("attachment").takeIf { it.isNotBlank() })
+            }.ifEmpty { listOf(ChatMessage(1, "سلام! من هوش آفلاین هستم. برای شروع، یک مدل سازگار را از تنظیمات وارد کن.", false)) }
+        } catch (_: Exception) {
+            listOf(ChatMessage(1, "سلام! من هوش آفلاین هستم. برای شروع، یک مدل سازگار را از تنظیمات وارد کن.", false))
+        }
+    }
+
+    private fun saveChatHistory(messages: List<ChatMessage>) {
+        val array = JSONArray()
+        messages.takeLast(150).forEach { message ->
+            array.put(JSONObject().put("id", message.id).put("text", message.text)
+                .put("user", message.fromUser).put("attachment", message.attachment ?: ""))
+        }
+        getSharedPreferences("chat", MODE_PRIVATE).edit().putString("messages", array.toString()).apply()
     }
 
     private fun speak(text: String) {
@@ -144,6 +175,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "fa-IR")
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "fa-IR")
             putExtra(RecognizerIntent.EXTRA_PROMPT, "به فارسی صحبت کنید")
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
         try { speechLauncher.launch(intent) } catch (_: Exception) {
             modelStatus = "اجرای تشخیص گفتار ممکن نشد"
@@ -172,7 +204,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         tts?.stop()
         tts?.shutdown()
-        aiEngine.close()
+        lifecycleScope.launch { aiEngine.close() }
         super.onDestroy()
     }
 }
@@ -186,16 +218,14 @@ private fun HoshApp(
     onPickModel: () -> Unit,
     onRemoveImage: () -> Unit,
     imageUri: Uri?,
+    initialMessages: List<ChatMessage>,
+    onHistoryChanged: (List<ChatMessage>) -> Unit,
     onSend: (String, Uri?, (String) -> Unit) -> Unit
 ) {
     var input by remember { mutableStateOf("") }
     var showTools by remember { mutableStateOf(false) }
-    val messages = remember {
-        mutableStateListOf(
-            ChatMessage(1, "سلام! من هوش آفلاین هستم. این محیط گفت‌وگو برای اجرای مدل‌های محلی آماده‌سازی شده است.", false),
-            ChatMessage(2, "برای پاسخ‌گویی هوشمند، ابتدا باید موتور استنتاج و فایل مدل سازگار نصب شوند. تا آن زمان پاسخ ساختگی تولید نمی‌کنم.", false)
-        )
-    }
+    val messages = remember { mutableStateListOf<ChatMessage>().apply { addAll(initialMessages) } }
+    LaunchedEffect(messages.size) { onHistoryChanged(messages.toList()) }
     val bg = Color(0xFF080D18)
     val surface = Color(0xFF121B2B)
     val panel = Color(0xFF19243A)
@@ -238,7 +268,16 @@ private fun HoshApp(
 
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("گفت‌وگوی جدید", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("گفت‌وگو", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = {
+                        messages.clear()
+                        messages.add(ChatMessage(System.currentTimeMillis(), "گفت‌وگوی تازه شروع شد. پیام خود را بنویس.", false))
+                    }, modifier = Modifier.size(30.dp)) {
+                        Icon(Icons.Default.Add, contentDescription = "گفت‌وگوی جدید", tint = muted, modifier = Modifier.size(18.dp))
+                    }
+                }
                 Text("حالت محلی", color = Color(0xFF8EE6B1), fontSize = 11.sp)
             }
             Spacer(Modifier.height(10.dp))
@@ -317,7 +356,7 @@ private fun HoshApp(
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.VolumeUp, contentDescription = null, tint = muted, modifier = Modifier.size(13.dp))
                         Spacer(Modifier.width(5.dp))
-                        Text("پاسخ صوتی و گفتار فارسی • موتور آفلاین در حال توسعه", color = muted, fontSize = 10.sp)
+                        Text("مدل روی دستگاه • تشخیص گفتار وابسته به سرویس نصب‌شده", color = muted, fontSize = 10.sp)
                     }
                 }
             }
